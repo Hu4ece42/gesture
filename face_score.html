@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Face Score</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a0a0f; color:#fff; font-family:-apple-system,Arial,sans-serif; min-height:100dvh; }
+
+#video  { display:none; }
+#canvas { width:100%; max-width:360px; border-radius:16px; display:block; margin:0 auto; }
+
+.container { max-width:420px; margin:0 auto; padding:16px; }
+
+h1 { text-align:center; font-size:22px; font-weight:900; margin-bottom:4px; }
+.sub { text-align:center; color:#666; font-size:12px; margin-bottom:16px; }
+
+/* Кнопка */
+#scan-btn {
+  width:100%; padding:16px; border-radius:14px;
+  background:linear-gradient(135deg,#5533ff,#3311cc);
+  color:#fff; border:none; font-size:16px; font-weight:bold;
+  cursor:pointer; margin:12px 0;
+  box-shadow:0 4px 20px rgba(85,51,255,.4);
+}
+#scan-btn:disabled { background:#222; color:#555; box-shadow:none; }
+
+/* Результаты */
+#results { display:none; }
+
+.score-big {
+  text-align:center; margin:16px 0;
+  background:#12121e; border-radius:20px; padding:20px;
+}
+.score-num { font-size:64px; font-weight:900; line-height:1; }
+.score-label { font-size:14px; color:#888; margin-top:6px; }
+.score-desc { font-size:13px; color:#aaa; margin-top:8px; line-height:1.5; }
+
+/* Метрики */
+.metrics { display:flex; flex-direction:column; gap:10px; margin:12px 0; }
+.metric {
+  background:#12121e; border-radius:12px; padding:12px 14px;
+}
+.metric-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.metric-name { font-size:13px; color:#ccc; }
+.metric-val  { font-size:14px; font-weight:bold; }
+.bar-bg { background:#1e1e2e; border-radius:6px; height:8px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:6px; transition:width .6s ease; }
+.metric-note { font-size:11px; color:#555; margin-top:4px; }
+
+/* Предупреждение */
+.disclaimer {
+  background:#1a1a0a; border:1px solid #333;
+  border-radius:12px; padding:12px; margin:12px 0;
+  font-size:11px; color:#666; line-height:1.6; text-align:center;
+}
+
+/* Загрузка */
+#loading-msg { text-align:center; color:#666; font-size:13px; padding:20px; display:none; }
+
+/* Статус */
+#status { text-align:center; font-size:11px; color:#444; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div style="height:max(env(safe-area-inset-top),12px)"></div>
+  <h1>📐 Face Score</h1>
+  <p class="sub">Анализ по геометрическим пропорциям лица</p>
+
+  <canvas id="canvas"></canvas>
+  <video id="video" autoplay playsinline muted></video>
+
+  <div id="loading-msg">⏳ Загружаю MediaPipe Face Mesh...</div>
+
+  <button id="scan-btn" onclick="startScan()" disabled>Загружаю модель...</button>
+
+  <div class="disclaimer">
+    ⚠️ Это математический анализ геометрии лица.<br>
+    Не является оценкой красоты или ценности человека.<br>
+    Результаты могут отличаться при разном освещении.
+  </div>
+
+  <div id="results">
+    <div class="score-big">
+      <div class="score-num" id="total-score">—</div>
+      <div class="score-label">из 10.0</div>
+      <div class="score-desc" id="score-desc">—</div>
+    </div>
+
+    <div class="metrics" id="metrics-list"></div>
+
+    <div class="disclaimer" style="margin-top:8px">
+      Оценка основана на классических пропорциях (золотое сечение, симметрия).<br>
+      Среднее значение по популяции ≈ 5.0–6.0.
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div style="height:20px"></div>
+</div>
+
+<!-- MediaPipe Face Mesh -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1620248257/camera_utils.js"></script>
+
+<script>
+const video  = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+let faceMesh = null;
+let lastLandmarks = null;
+let scanning = false;
+
+// ── Инициализация ─────────────────────────────────────────────────────────
+function initFaceMesh() {
+  document.getElementById('loading-msg').style.display = 'block';
+
+  faceMesh = new FaceMesh({ locateFile: f =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}` });
+
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: true,       // 478 точек включая радужку
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+
+  faceMesh.onResults(onResults);
+
+  faceMesh.initialize().then(() => {
+    document.getElementById('loading-msg').style.display = 'none';
+    document.getElementById('scan-btn').disabled = false;
+    document.getElementById('scan-btn').textContent = '📷 Включить камеру';
+    document.getElementById('status').textContent = 'Модель загружена';
+  }).catch(e => {
+    document.getElementById('loading-msg').textContent = 'Ошибка загрузки: ' + e;
+  });
+}
+
+// ── Обработка результатов ─────────────────────────────────────────────────
+function onResults(results) {
+  if (!results.multiFaceLandmarks || !results.multiFaceLandmarks.length) {
+    lastLandmarks = null;
+    document.getElementById('status').textContent = 'Лицо не обнаружено — встань ближе к камере';
+    drawNoFace();
+    return;
+  }
+
+  const lm = results.multiFaceLandmarks[0];
+  lastLandmarks = lm;
+
+  // Рисуем сетку
+  canvas.width  = video.videoWidth  || 360;
+  canvas.height = video.videoHeight || 480;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.translate(-canvas.width, 0);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  // Рисуем точки лица
+  drawConnectors(ctx, lm, FACEMESH_TESSELATION,
+    { color:'rgba(100,100,255,0.15)', lineWidth:1 });
+  drawConnectors(ctx, lm, FACEMESH_RIGHT_EYE,
+    { color:'rgba(0,200,255,0.8)', lineWidth:1.5 });
+  drawConnectors(ctx, lm, FACEMESH_LEFT_EYE,
+    { color:'rgba(0,200,255,0.8)', lineWidth:1.5 });
+  drawConnectors(ctx, lm, FACEMESH_FACE_OVAL,
+    { color:'rgba(100,255,100,0.5)', lineWidth:1.5 });
+  drawConnectors(ctx, lm, FACEMESH_LIPS,
+    { color:'rgba(255,100,100,0.8)', lineWidth:1.5 });
+
+  document.getElementById('status').textContent =
+    `✓ Лицо обнаружено · ${lm.length} точек`;
+
+  if (scanning) {
+    scanning = false;
+    analyzeAndShow(lm, canvas.width, canvas.height);
+    document.getElementById('scan-btn').disabled = false;
+    document.getElementById('scan-btn').textContent = '🔄 Пересканировать';
+  }
+}
+
+function drawNoFace() {
+  canvas.width  = video.videoWidth  || 360;
+  canvas.height = video.videoHeight || 480;
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.translate(-canvas.width, 0);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,0,0,0.15)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+// ── Геометрический анализ ─────────────────────────────────────────────────
+function pt(lm, i, w, h) {
+  return { x: lm[i].x * w, y: lm[i].y * h };
+}
+
+function dist(a, b) {
+  return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2);
+}
+
+function analyzeAndShow(lm, w, h) {
+  const p = i => pt(lm, i, w, h);
+
+  // ── Ключевые точки ────────────────────────────────────────────────────
+  // Лицо
+  const faceTop    = p(10);   // верх лба
+  const faceBottom = p(152);  // подбородок
+  const faceLeft   = p(234);  // левый край
+  const faceRight  = p(454);  // правый край
+
+  // Глаза
+  const leftEyeL  = p(33);   // левый угол левого глаза
+  const leftEyeR  = p(133);  // правый угол левого глаза
+  const rightEyeL = p(362);  // левый угол правого глаза
+  const rightEyeR = p(263);  // правый угол правого глаза
+
+  // Нос
+  const noseTip   = p(4);
+  const noseBase  = p(2);
+  const noseLeft  = p(129);
+  const noseRight = p(358);
+
+  // Рот
+  const mouthLeft  = p(61);
+  const mouthRight = p(291);
+  const mouthTop   = p(13);
+  const mouthBot   = p(14);
+
+  // Брови
+  const browLeft   = p(70);
+  const browRight  = p(300);
+
+  // ── Базовые размеры ───────────────────────────────────────────────────
+  const faceH = dist(faceTop, faceBottom);
+  const faceW = dist(faceLeft, faceRight);
+
+  if (faceH < 10 || faceW < 10) return;
+
+  // ── 1. Симметрия лица ─────────────────────────────────────────────────
+  // Центральная ось X
+  const centerX = (faceLeft.x + faceRight.x) / 2;
+
+  // Отклонения ключевых точек от оси
+  const noseDev   = Math.abs(noseTip.x - centerX) / faceW;
+  const mouthDev  = Math.abs((mouthLeft.x + mouthRight.x)/2 - centerX) / faceW;
+  const eyeSymL   = Math.abs(leftEyeL.x  - centerX);
+  const eyeSymR   = Math.abs(rightEyeR.x - centerX);
+  const eyeSymDev = Math.abs(eyeSymL - eyeSymR) / faceW;
+
+  // Высота глаз
+  const leftEyeH  = dist(p(159), p(145));  // верх-низ левого глаза
+  const rightEyeH = dist(p(386), p(374));  // верх-низ правого глаза
+  const eyeHDev   = Math.abs(leftEyeH - rightEyeH) / Math.max(leftEyeH, rightEyeH);
+
+  const symmetryScore = clamp(10 - (noseDev + mouthDev + eyeSymDev + eyeHDev) * 40, 0, 10);
+
+  // ── 2. Пропорции лица (золотое сечение φ = 1.618) ────────────────────
+  const PHI = 1.618;
+  const faceRatio = faceH / faceW;  // идеал ≈ 1.618
+
+  // Трети лица
+  const foreheadH = dist(faceTop, browLeft);
+  const midH      = dist(browLeft, noseBase);
+  const lowerH    = dist(noseBase, faceBottom);
+
+  // Идеал: три равные трети
+  const thirdIdeal = faceH / 3;
+  const thirdDev   = (
+    Math.abs(foreheadH - thirdIdeal) +
+    Math.abs(midH      - thirdIdeal) +
+    Math.abs(lowerH    - thirdIdeal)
+  ) / faceH;
+
+  // Отклонение от золотого сечения
+  const phiDev = Math.abs(faceRatio - PHI) / PHI;
+
+  const proportionScore = clamp(10 - thirdDev * 15 - phiDev * 8, 0, 10);
+
+  // ── 3. Глаза ─────────────────────────────────────────────────────────
+  const leftEyeW  = dist(leftEyeL,  leftEyeR);
+  const rightEyeW = dist(rightEyeL, rightEyeR);
+  const eyeSpan   = dist(leftEyeL,  rightEyeR);  // расстояние между внешними углами
+
+  // Идеал: ширина глаза = 1/5 ширины лица
+  const eyeWidthRatio = (leftEyeW + rightEyeW) / 2 / faceW;
+  const eyeIdeal = 0.2;
+  const eyeWidthDev = Math.abs(eyeWidthRatio - eyeIdeal) / eyeIdeal;
+
+  // Межглазное расстояние = ширина одного глаза (идеал)
+  const interEye = dist(leftEyeR, rightEyeL);
+  const interEyeRatio = interEye / ((leftEyeW + rightEyeW) / 2);
+  const interEyeDev = Math.abs(interEyeRatio - 1.0);
+
+  // Форма глаза (aspect ratio) — идеал ≈ 0.3
+  const leftAR  = leftEyeH  / leftEyeW;
+  const rightAR = rightEyeH / rightEyeW;
+  const eyeAR   = (leftAR + rightAR) / 2;
+  const eyeARDev = Math.abs(eyeAR - 0.3) / 0.3;
+
+  const eyeScore = clamp(10 - eyeWidthDev * 6 - interEyeDev * 4 - eyeARDev * 3, 0, 10);
+
+  // ── 4. Нос ───────────────────────────────────────────────────────────
+  const noseW = dist(noseLeft, noseRight);
+  const noseH = dist(noseTip, noseBase);
+
+  // Ширина носа = 1/4 ширины лица (идеал)
+  const noseWRatio = noseW / faceW;
+  const noseWDev   = Math.abs(noseWRatio - 0.25) / 0.25;
+
+  // Высота носа = 1/3 высоты лица
+  const noseHRatio = noseH / faceH;
+  const noseHDev   = Math.abs(noseHRatio - 0.33) / 0.33;
+
+  const noseScore = clamp(10 - noseWDev * 5 - noseHDev * 4, 0, 10);
+
+  // ── 5. Губы ───────────────────────────────────────────────────────────
+  const mouthW = dist(mouthLeft, mouthRight);
+  const mouthH = dist(mouthTop, mouthBot);
+
+  // Ширина рта = 1/2 ширины лица (идеал)
+  const mouthWRatio = mouthW / faceW;
+  const mouthWDev   = Math.abs(mouthWRatio - 0.5) / 0.5;
+
+  // Соотношение верхней/нижней губы ≈ 1:1.6
+  const lipTop = dist(mouthTop, p(0));   // верхняя губа
+  const lipBot = dist(mouthBot, p(17));  // нижняя губа
+  const lipRatio = lipBot / Math.max(lipTop, 0.001);
+  const lipDev   = Math.abs(lipRatio - 1.6) / 1.6;
+
+  const lipsScore = clamp(10 - mouthWDev * 5 - lipDev * 3, 0, 10);
+
+  // ── 6. Скулы и форма лица ────────────────────────────────────────────
+  const cheekL = p(116);
+  const cheekR = p(345);
+  const cheekW = dist(cheekL, cheekR);
+  const jawL   = p(172);
+  const jawR   = p(397);
+  const jawW   = dist(jawL, jawR);
+
+  // Идеал: скулы шире челюсти (cheekW > jawW)
+  const cheekJawRatio = cheekW / Math.max(jawW, 1);
+  const cheekJawDev   = Math.abs(cheekJawRatio - 1.2) / 1.2;
+
+  // Форма лица: отношение ширины к высоте
+  const faceShapeDev = Math.abs(faceRatio - 1.5) / 1.5;
+
+  const jawScore = clamp(10 - cheekJawDev * 5 - faceShapeDev * 4, 0, 10);
+
+  // ── Итоговый балл (взвешенное среднее) ───────────────────────────────
+  const weights = {
+    'Симметрия':    { score: symmetryScore,   w: 0.30 },
+    'Пропорции':    { score: proportionScore, w: 0.20 },
+    'Глаза':        { score: eyeScore,        w: 0.20 },
+    'Нос':          { score: noseScore,       w: 0.10 },
+    'Губы':         { score: lipsScore,       w: 0.10 },
+    'Форма лица':   { score: jawScore,        w: 0.10 },
+  };
+
+  let total = 0;
+  for (const m of Object.values(weights)) {
+    total += m.score * m.w;
+  }
+
+  // Калибровка: сдвигаем распределение чтобы среднее было ~5.5
+  // Без завышения — не добавляем бонусов
+  total = Math.round(total * 10) / 10;
+
+  showResults(total, weights);
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+// ── Отображение результатов ───────────────────────────────────────────────
+function showResults(total, metrics) {
+  document.getElementById('results').style.display = 'block';
+
+  const scoreEl = document.getElementById('total-score');
+  scoreEl.textContent = total.toFixed(1);
+
+  // Цвет по баллу
+  if      (total >= 8.5) scoreEl.style.color = '#ffd700';
+  else if (total >= 7.0) scoreEl.style.color = '#00ff88';
+  else if (total >= 5.5) scoreEl.style.color = '#00aaff';
+  else if (total >= 4.0) scoreEl.style.color = '#ff8833';
+  else                   scoreEl.style.color = '#ff4444';
+
+  // Описание
+  const descs = [
+    [9.0, 'Исключительные пропорции. Топ 1% по геометрии.'],
+    [8.0, 'Очень гармоничные черты. Выше среднего.'],
+    [7.0, 'Хорошие пропорции. Заметно выше среднего.'],
+    [6.0, 'Немного выше среднего по популяции.'],
+    [5.0, 'Среднее значение по популяции (норма).'],
+    [4.0, 'Незначительные отклонения от идеала.'],
+    [0.0, 'Заметные отклонения от классических пропорций.'],
+  ];
+  const desc = descs.find(([t]) => total >= t);
+  document.getElementById('score-desc').textContent = desc ? desc[1] : '';
+
+  // Метрики
+  const list = document.getElementById('metrics-list');
+  list.innerHTML = '';
+
+  const notes = {
+    'Симметрия':  'Отклонение ключевых точек от центральной оси',
+    'Пропорции':  'Соответствие золотому сечению и трём третям',
+    'Глаза':      'Размер, форма, межглазное расстояние',
+    'Нос':        'Ширина и высота относительно лица',
+    'Губы':       'Ширина рта, соотношение верхней/нижней губы',
+    'Форма лица': 'Соотношение скул, челюсти и высоты лица',
+  };
+
+  for (const [name, { score, w }] of Object.entries(metrics)) {
+    const pct = Math.round(score * 10);
+    const color = score >= 7 ? '#00ff88' : score >= 5 ? '#00aaff' : score >= 3 ? '#ff8833' : '#ff4444';
+
+    const el = document.createElement('div');
+    el.className = 'metric';
+    el.innerHTML = `
+      <div class="metric-header">
+        <span class="metric-name">${name} <span style="color:#444;font-size:10px">(вес ${Math.round(w*100)}%)</span></span>
+        <span class="metric-val" style="color:${color}">${score.toFixed(1)}</span>
+      </div>
+      <div class="bar-bg">
+        <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+      </div>
+      <div class="metric-note">${notes[name] || ''}</div>
+    `;
+    list.appendChild(el);
+  }
+
+  // Скролл к результатам
+  document.getElementById('results').scrollIntoView({ behavior:'smooth' });
+}
+
+// ── Запуск камеры ─────────────────────────────────────────────────────────
+let cameraStarted = false;
+
+async function startScan() {
+  const btn = document.getElementById('scan-btn');
+
+  if (!cameraStarted) {
+    btn.disabled = true;
+    btn.textContent = 'Запускаю камеру...';
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await video.play();
+      cameraStarted = true;
+
+      // Запускаем цикл
+      async function loop() {
+        if (video.readyState >= 2 && faceMesh) {
+          await faceMesh.send({ image: video });
+        }
+        requestAnimationFrame(loop);
+      }
+      loop();
+
+      btn.disabled = false;
+      btn.textContent = '📐 Сканировать';
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = '📷 Включить камеру';
+      document.getElementById('status').textContent = 'Ошибка камеры: ' + e.message;
+      return;
+    }
+  }
+
+  // Делаем скан
+  btn.disabled = true;
+  btn.textContent = '⏳ Анализирую...';
+  scanning = true;
+
+  // Таймаут если лицо не найдено
+  setTimeout(() => {
+    if (scanning) {
+      scanning = false;
+      btn.disabled = false;
+      btn.textContent = '📐 Сканировать';
+      document.getElementById('status').textContent = 'Лицо не найдено. Встань ближе, улучши освещение.';
+    }
+  }, 4000);
+}
+
+// Инициализируем при загрузке
+window.addEventListener('load', initFaceMesh);
+</script>
+</body>
+</html>
