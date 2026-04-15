@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>GestureAI</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body { background:#000; color:#fff; font-family:-apple-system,Arial,sans-serif; overflow:hidden; height:100dvh; touch-action:none; }
+
+#video  { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+#canvas { position:fixed; inset:0; width:100%; height:100%; transform:scaleX(-1); pointer-events:none; z-index:2; }
+#overlay{ position:fixed; inset:0; background:rgba(0,0,0,0.28); pointer-events:none; z-index:3; }
+
+/* Заголовок */
+#header {
+  position:fixed; top:max(env(safe-area-inset-top),16px); left:0; right:0;
+  text-align:center; z-index:10; pointer-events:none;
+}
+#title { font-size:20px; font-weight:800; letter-spacing:1px; text-shadow:0 2px 8px #000; }
+#status { font-size:11px; color:#bbb; margin-top:5px; display:flex; justify-content:center; align-items:center; gap:8px; }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; transition:background .3s; }
+
+/* Жест */
+#gesture-wrap {
+  position:fixed; top:22%; left:0; right:0;
+  text-align:center; z-index:10; pointer-events:none;
+}
+#gesture-name { font-size:30px; font-weight:bold; text-shadow:0 2px 12px #000; min-height:40px; }
+
+/* Сообщение */
+#msg-box {
+  position:fixed; top:40%; left:16px; right:16px;
+  background:rgba(0,0,0,0.9);
+  border:2.5px solid #5533ff;
+  border-radius:22px;
+  padding:22px 20px;
+  text-align:center;
+  z-index:20;
+  opacity:0;
+  transform:scale(0.6);
+  transition:opacity .25s, transform .25s cubic-bezier(.34,1.56,.64,1);
+  pointer-events:none;
+}
+#msg-box.show { opacity:1; transform:scale(1); }
+#msg-text { font-size:26px; font-weight:bold; line-height:1.3; }
+
+/* Подсказки */
+#hints {
+  position:fixed; bottom:max(env(safe-area-inset-bottom),16px); left:12px; right:12px;
+  background:rgba(0,0,0,0.7);
+  border-radius:16px; padding:12px 14px;
+  z-index:10; pointer-events:none;
+}
+.hint { display:flex; align-items:center; margin:3px 0; font-size:12px; color:#ccc; }
+.hi { font-size:17px; width:28px; flex-shrink:0; }
+
+/* Кнопка старта */
+#start-screen {
+  position:fixed; inset:0; background:#0a0a14;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  z-index:50; gap:20px; padding:30px;
+}
+#start-screen h1 { font-size:32px; font-weight:900; }
+#start-screen p  { color:#888; font-size:14px; text-align:center; line-height:1.6; }
+#start-btn {
+  background:linear-gradient(135deg,#5533ff,#3311cc);
+  color:#fff; border:none;
+  padding:18px 48px; border-radius:32px;
+  font-size:18px; font-weight:bold;
+  cursor:pointer; width:100%; max-width:300px;
+  box-shadow:0 6px 24px rgba(85,51,255,.5);
+  active:opacity:.8;
+}
+
+/* Загрузка */
+#loading {
+  position:fixed; inset:0; background:rgba(0,0,0,.92);
+  display:none; flex-direction:column; align-items:center; justify-content:center;
+  z-index:60; gap:16px;
+}
+.spinner {
+  width:44px; height:44px; border:3px solid #222;
+  border-top-color:#5533ff; border-radius:50%;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+#load-text { color:#aaa; font-size:15px; }
+</style>
+</head>
+<body>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="overlay"></div>
+
+<!-- Стартовый экран -->
+<div id="start-screen">
+  <div style="font-size:56px">✋</div>
+  <h1>GestureAI</h1>
+  <p>Управляй жестами рук.<br>Два кулака — сюрприз 😄<br>Работает прямо в браузере.</p>
+  <button id="start-btn" onclick="startApp()">📷 Запустить</button>
+</div>
+
+<!-- Загрузка -->
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="load-text">Загружаю MediaPipe...</div>
+</div>
+
+<!-- UI поверх камеры -->
+<div id="header">
+  <div id="title">✋ GestureAI</div>
+  <div id="status">
+    <span class="dot" id="face-dot" style="background:#555"></span>
+    <span id="face-lbl">Лицо: нет</span>
+    <span class="dot" id="hand-dot" style="background:#555"></span>
+    <span id="hand-lbl">Рук: 0</span>
+  </div>
+</div>
+
+<div id="gesture-wrap">
+  <div id="gesture-name">—</div>
+</div>
+
+<div id="msg-box">
+  <div id="msg-text"></div>
+</div>
+
+<div id="hints">
+  <div class="hint"><span class="hi">⬆️</span>Свайп вверх — следующее видео</div>
+  <div class="hint"><span class="hi">⬇️</span>Свайп вниз — предыдущее видео</div>
+  <div class="hint"><span class="hi">✋</span>Открытая ладонь — пауза</div>
+  <div class="hint"><span class="hi">�</span>Большой палец — лайк</div>
+  <div class="hint"><span class="hi">�👊</span>Два кулака — сюрприз!</div>
+</div>
+
+<!-- MediaPipe через CDN (грузится при открытии) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js"></script>
+
+<script>
+// ── Утилиты ───────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const canvas = $('canvas'), ctx = canvas.getContext('2d');
+const video  = $('video');
+
+let msgTimer = null;
+function showMsg(text, ms = 2800) {
+  $('msg-text').textContent = text;
+  $('msg-box').classList.add('show');
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => $('msg-box').classList.remove('show'), ms);
+}
+
+// ── Классификация жеста ───────────────────────────────────────────────────
+function classifyHand(lm) {
+  // lm[0]=запястье, [4]=большой, [8]=указательный, [12]=средний, [16]=безымянный, [20]=мизинец
+  const up = i => lm[i].y < lm[i-2].y - 0.03;  // кончик выше второго сустава
+
+  const thumb  = lm[4].y < lm[3].y - 0.02;
+  const index  = up(8);
+  const middle = up(12);
+  const ring   = up(16);
+  const pinky  = up(20);
+  const count  = [index,middle,ring,pinky].filter(Boolean).length;
+
+  if (count === 0 && !thumb) return 'fist';
+  if (count >= 4)            return 'palm';
+  if (thumb && count === 0)  return 'thumbs_up';
+  if (index && !middle && !ring && !pinky) {
+    const dx = lm[8].x - lm[0].x;
+    return dx > 0.08 ? 'point_r' : dx < -0.08 ? 'point_l' : 'point_u';
+  }
+  return 'other';
+}
+
+// ── Детектор свайпа ───────────────────────────────────────────────────────
+const wristBuf = [];
+function detectSwipe(lm) {
+  const now = Date.now();
+  wristBuf.push({ y: lm[0].y, t: now });
+  while (wristBuf.length > 12) wristBuf.shift();
+  if (wristBuf.length < 6) return null;
+  const dy = wristBuf[0].y - wristBuf.at(-1).y;
+  const dt = wristBuf.at(-1).t - wristBuf[0].t;
+  if (dt < 700 && Math.abs(dy) > 0.18) return dy > 0 ? 'swipe_up' : 'swipe_down';
+  return null;
+}
+
+// ── Состояние ─────────────────────────────────────────────────────────────
+let lastGesture = '';
+let lastFistBoth = 0;
+const GESTURE_LABELS = {
+  fist:'✊ Кулак', palm:'✋ Ладонь', thumbs_up:'👍 Лайк',
+  point_r:'👉 Вправо', point_l:'👈 Влево', point_u:'☝️ Вверх',
+  swipe_up:'⬆️ Свайп вверх', swipe_down:'⬇️ Свайп вниз',
+  fist_both:'👊👊 Два кулака', other:'?', '':'—',
+};
+
+// ── Обработка рук ─────────────────────────────────────────────────────────
+function onHands(results) {
+  canvas.width  = video.videoWidth  || window.innerWidth;
+  canvas.height = video.videoHeight || window.innerHeight;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const hands = results.multiHandLandmarks || [];
+  $('hand-dot').style.background = hands.length ? '#00aaff' : '#555';
+  $('hand-lbl').textContent = `Рук: ${hands.length}`;
+
+  // Рисуем скелет
+  for (const lm of hands) {
+    drawConnectors(ctx, lm, HAND_CONNECTIONS, { color:'rgba(0,170,255,0.4)', lineWidth:2 });
+    drawLandmarks(ctx, lm, { color:'#00aaff', lineWidth:1, radius:4 });
+  }
+
+  if (!hands.length) { $('gesture-name').textContent = '—'; return; }
+
+  const gestures = hands.map(classifyHand);
+  const swipe    = detectSwipe(hands[0]);
+
+  let g = gestures[0];
+
+  // Два кулака
+  if (hands.length >= 2 && gestures[0] === 'fist' && gestures[1] === 'fist') {
+    const now = Date.now();
+    if (now - lastFistBoth > 3000) {
+      lastFistBoth = now;
+      g = 'fist_both';
+      showMsg('👊👊 Назар гандон 👊👊', 4000);
+    }
+  }
+  // Свайп
+  else if (swipe) {
+    g = swipe;
+    if (g !== lastGesture) {
+      if (swipe === 'swipe_up')   showMsg('⬆️ Следующее видео');
+      if (swipe === 'swipe_down') showMsg('⬇️ Предыдущее видео');
+    }
+  }
+  // Одиночные
+  else if (g !== lastGesture) {
+    if (g === 'palm')      showMsg('✋ Пауза');
+    if (g === 'thumbs_up') showMsg('👍 Лайк!');
+    if (g === 'point_r')   showMsg('👉 Вперёд');
+    if (g === 'point_l')   showMsg('👈 Назад');
+  }
+
+  lastGesture = g;
+  $('gesture-name').textContent = GESTURE_LABELS[g] || g;
+}
+
+// ── Обработка лица ────────────────────────────────────────────────────────
+function onFace(results) {
+  const faces = results.detections || [];
+  $('face-dot').style.background = faces.length ? '#00ff88' : '#ff4444';
+  $('face-lbl').textContent = faces.length ? `Лицо: ✓` : 'Лицо: нет';
+
+  for (const det of faces) {
+    const bb = det.boundingBox;
+    if (!bb) continue;
+    const x = (bb.xCenter - bb.width/2)  * canvas.width;
+    const y = (bb.yCenter - bb.height/2) * canvas.height;
+    const w = bb.width  * canvas.width;
+    const h = bb.height * canvas.height;
+    ctx.strokeStyle = 'rgba(0,255,136,0.6)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+  }
+}
+
+// ── Запуск ────────────────────────────────────────────────────────────────
+async function startApp() {
+  $('start-screen').style.display = 'none';
+  $('loading').style.display = 'flex';
+
+  // Инициализация Hands
+  $('load-text').textContent = 'Загружаю детектор рук...';
+  const hands = new Hands({ locateFile: f =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands:2, modelComplexity:0,
+    minDetectionConfidence:0.65, minTrackingConfidence:0.55 });
+  hands.onResults(onHands);
+
+  // Инициализация Face
+  $('load-text').textContent = 'Загружаю детектор лиц...';
+  const face = new FaceDetection({ locateFile: f =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/${f}` });
+  face.setOptions({ model:'short', minDetectionConfidence:0.5 });
+  face.onResults(onFace);
+
+  // Камера
+  $('load-text').textContent = 'Запускаю камеру...';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+
+  $('loading').style.display = 'none';
+
+  // Цикл
+  let tick = 0;
+  async function loop() {
+    if (video.readyState >= 2) {
+      tick++;
+      await hands.send({ image: video });
+      if (tick % 3 === 0) await face.send({ image: video });
+    }
+    requestAnimationFrame(loop);
+  }
+  loop();
+}
+</script>
+</body>
+</html>
